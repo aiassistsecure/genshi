@@ -37,14 +37,42 @@ def _domain_of(url: str) -> str:
 
 
 async def _safe_call(coro, label: str, events: list[dict], queue: Optional[asyncio.Queue] = None):
+    """Run a Netrows coroutine, swallowing any error into a `source_error` event,
+    and emit a `source_call` event on success so the SSE stream surfaces every
+    upstream API hit (label + elapsed ms + rough item count). Without this, the
+    deep-enrichment phases (which fan out 10-30 parallel calls) look completely
+    silent to the frontend even though heavy work is in flight."""
+    import time
+    t0 = time.monotonic()
     try:
-        return await coro
+        result = await coro
     except Exception as e:
-        ev = {"type": "source_error", "source": label, "error": str(e)[:200]}
+        ev = {"type": "source_error", "source": label, "error": str(e)[:200],
+              "ms": int((time.monotonic() - t0) * 1000)}
         events.append(ev)
         if queue is not None:
             await queue.put(ev)
         return None
+    # Best-effort: count items if the payload looks like a list/dict-with-items
+    n: Optional[int] = None
+    try:
+        if isinstance(result, list):
+            n = len(result)
+        elif isinstance(result, dict):
+            for k in ("items", "results", "data", "valid_emails", "emails"):
+                v = result.get(k)
+                if isinstance(v, list):
+                    n = len(v); break
+            if n is None and result.get("name"):
+                n = 1  # single-record response (profile/company)
+    except Exception:
+        pass
+    ev = {"type": "source_call", "source": label,
+          "ms": int((time.monotonic() - t0) * 1000), "count": n}
+    events.append(ev)
+    if queue is not None:
+        await queue.put(ev)
+    return result
 
 
 async def generate_rows(

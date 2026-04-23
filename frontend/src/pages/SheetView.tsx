@@ -22,6 +22,9 @@ export default function SheetView() {
     employee_min?: number | null; employee_max?: number | null;
   } | null>(null);
   const [emptyHint, setEmptyHint] = useState<string>("");
+  const [callCount, setCallCount] = useState<number>(0);
+  const [elapsedMs, setElapsedMs] = useState<number>(0);
+  const [stale, setStale] = useState<string>("");
   const esRef = useRef<EventSource | null>(null);
   const [selectedCell, setSelectedCell] = useState<{ row: number; col: number } | null>(null);
 
@@ -108,12 +111,30 @@ export default function SheetView() {
       } else if (t === "intel_done") {
         pushStage("✓ signals", d.count);
         setEvents((p) => [`intelligence scan: ${d.count} signals`, ...p].slice(0, 30));
+      } else if (t === "source_call") {
+        // Per-API-call firehose. Don't push a stage chip (would flood it),
+        // just bump the counter and prepend a compact line in the events log.
+        setCallCount((c) => c + 1);
+        const ms = d.ms != null ? `${d.ms}ms` : "";
+        const cnt = d.count != null ? `· ${d.count}` : "";
+        setEvents((p) => [`◆ ${d.source} ${cnt} ${ms}`.replace(/\s+/g, " ").trim(), ...p].slice(0, 80));
+      } else if (t === "tick") {
+        // Heartbeat — backend is alive even during long parallel-gather phases.
+        setElapsedMs(d.elapsed_ms || 0);
+        if (d.calls != null) setCallCount(d.calls);
+        if (d.stage) setStage(d.stage);
+      } else if (t === "stale") {
+        // Server restarted mid-flight; offer recovery instead of spinning forever.
+        setStale(d.hint || "Generation was interrupted.");
+        setStage(""); es.close();
       } else if (t === "source_error") {
-        setEvents((p) => [`⚠ ${d.source}: ${d.error}`, ...p].slice(0, 30));
+        setEvents((p) => [`⚠ ${d.source}: ${d.error}`, ...p].slice(0, 80));
       } else if (t === "llm_error") {
         setEvents((p) => [`⚠ LLM: ${d.error}`, ...p].slice(0, 30));
       } else if (t === "persisted") {
         setStage("persisted"); pushStage("✓ saved");
+        if (d.elapsed_ms) setElapsedMs(d.elapsed_ms);
+        setEvents((p) => [`✓ persisted ${d.rows} rows in ${((d.elapsed_ms || 0) / 1000).toFixed(1)}s`, ...p].slice(0, 80));
         await refresh();
       } else if (t === "error") {
         setError(d.error || "Unknown error"); setStage("");
@@ -127,6 +148,7 @@ export default function SheetView() {
   const generate = async () => {
     setError(""); setEvents([]); setStageLog([]); setPlan([]); setPrimary("");
     setQueryPlan(null); setEmptyHint(""); setStage("starting…");
+    setCallCount(0); setElapsedMs(0); setStale("");
     try {
       await api.generate(id, { row_limit: 15 });
       setSheet((s) => s ? { ...s, status: "generating" } : s);
@@ -134,6 +156,19 @@ export default function SheetView() {
     } catch (e: any) {
       setError(e.message || String(e));
       setStage("");
+    }
+  };
+
+  // Recover a sheet stuck in "generating" because the in-process job was
+  // killed (server restart). Resets status server-side, then re-fires.
+  const recoverAndGenerate = async () => {
+    try {
+      await fetch(`/api/sheets/${id}/reset`, { method: "POST" });
+      await refresh();
+      setStale("");
+      await generate();
+    } catch (e: any) {
+      setError(e.message || String(e));
     }
   };
 
@@ -254,7 +289,7 @@ export default function SheetView() {
     return (r?.cells?.[h] || null) as Cell | null;
   })();
 
-  const isGenerating = sheet.status === "generating" || stage !== "";
+  const isGenerating = (sheet.status === "generating" || stage !== "") && !stale;
 
   return (
     <div className="flex flex-col h-full">
@@ -296,6 +331,18 @@ export default function SheetView() {
         </div>
       </div>
 
+      {/* Stale-job recovery banner — shown when a previous generation was
+          interrupted by a server restart and the in-memory job is gone. */}
+      {stale && (
+        <div className="border-b border-amber-300 bg-amber-50 px-6 py-2 text-xs text-amber-900 shrink-0 flex items-center gap-3">
+          <span className="text-base">⚠</span>
+          <span className="flex-1">{stale}</span>
+          <button className="btn-primary text-xs px-3 py-1" onClick={recoverAndGenerate}>
+            Recover &amp; Regenerate
+          </button>
+        </div>
+      )}
+
       {/* Status strip + stage timeline */}
       {(stage || error || events.length > 0 || stageLog.length > 0 || queryPlan || emptyHint) && (
         <div className="border-b border-ink-200 bg-gradient-to-b from-ink-50 to-white px-6 py-2 text-xs text-ink-600 shrink-0">
@@ -311,6 +358,20 @@ export default function SheetView() {
             )}
             {primary && <span className="text-ink-500">primary: <span className="font-mono text-ink-700">{primary}</span></span>}
             {plan.length > 0 && <span className="text-ink-400 hidden md:inline truncate">plan: <span className="font-mono">{plan.join(" → ")}</span></span>}
+            {(callCount > 0 || elapsedMs > 0) && (
+              <span className="ml-auto inline-flex items-center gap-2 font-mono text-[10px] text-ink-500">
+                {callCount > 0 && (
+                  <span className="px-1.5 py-0.5 rounded bg-cyan-50 border border-cyan-200 text-cyan-800">
+                    {callCount} call{callCount === 1 ? "" : "s"}
+                  </span>
+                )}
+                {elapsedMs > 0 && (
+                  <span className="px-1.5 py-0.5 rounded bg-ink-100 border border-ink-200 text-ink-700">
+                    {(elapsedMs / 1000).toFixed(1)}s
+                  </span>
+                )}
+              </span>
+            )}
             {error && <span className="text-red-600">⚠ {error}</span>}
           </div>
 
@@ -376,19 +437,42 @@ export default function SheetView() {
             </div>
           )}
 
-          {/* Live event feed (most recent 5) — collapsed details for the rest */}
+          {/* Live research console — auto-open while generating so the user
+              actually sees the firehose of upstream API calls. Color-coded:
+              ◆ = source_call, ⚠ = error, ✓ = milestone. */}
           {events.length > 0 && (
-            <details className="mt-1">
-              <summary className="cursor-pointer text-[10px] uppercase tracking-wide text-ink-400 hover:text-ink-600">
-                live events ({events.length})
+            <details className="mt-1" open={isGenerating}>
+              <summary className="cursor-pointer text-[10px] uppercase tracking-wide text-ink-400 hover:text-ink-600 select-none">
+                <span className="inline-flex items-center gap-2">
+                  <span>research console</span>
+                  <span className="px-1 rounded bg-ink-200 text-ink-700">{events.length}</span>
+                  {isGenerating && (
+                    <span className="inline-flex items-center gap-1 text-emerald-600">
+                      <span className="relative flex h-1.5 w-1.5">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                      </span>
+                      streaming
+                    </span>
+                  )}
+                </span>
               </summary>
-              <div className="mt-1 max-h-40 overflow-y-auto bg-ink-900/95 text-ink-100 rounded p-2 font-mono text-[10px] leading-relaxed">
-                {events.map((e, i) => (
-                  <div key={i} className="whitespace-pre-wrap break-all">
-                    <span className="text-ink-500 mr-2">{String(events.length - i).padStart(2, "0")}</span>
-                    {e}
-                  </div>
-                ))}
+              <div className="mt-1 max-h-56 overflow-y-auto bg-ink-900/95 text-ink-100 rounded p-2 font-mono text-[10px] leading-relaxed border border-ink-800">
+                {events.map((e, i) => {
+                  const isCall = e.startsWith("◆");
+                  const isWarn = e.startsWith("⚠");
+                  const isOk = e.startsWith("✓");
+                  const cls = isWarn ? "text-amber-300"
+                            : isOk ? "text-emerald-300"
+                            : isCall ? "text-cyan-300"
+                            : "text-ink-100";
+                  return (
+                    <div key={i} className="whitespace-pre-wrap break-all">
+                      <span className="text-ink-500 mr-2">{String(events.length - i).padStart(3, "0")}</span>
+                      <span className={cls}>{e}</span>
+                    </div>
+                  );
+                })}
               </div>
             </details>
           )}

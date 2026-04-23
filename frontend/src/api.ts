@@ -89,7 +89,15 @@ export function streamSheet(sheetId: string, onEvent: (ev: { type: string; data:
     onEvent({ type: e.type, data });
   };
   // sse-starlette wraps each event as named events; subscribe to the ones we care about
-  ["plan", "stage", "primary_done", "secondary_done", "emails_fetched", "intel_done", "llm_error", "source_error", "done", "persisted", "error", "end", "message", "intel_done"].forEach((t) => {
+  [
+    "plan", "stage", "query_plan", "page_fetched", "primary_retry", "fallback",
+    "producer_empty", "primary_done", "secondary_done", "deep_profiles_done",
+    "yc_deep_done", "maps_place_done", "crunchbase_company_done",
+    "crunchbase_person_done", "indeed_company_done", "indeed_job_details_done",
+    "github_enrich_done", "emails_fetched", "intel_done", "backfill",
+    "source_call", "source_error", "tick", "stale", "llm_error",
+    "done", "persisted", "error", "end", "message",
+  ].forEach((t) => {
     es.addEventListener(t, handler as any);
   });
   es.onerror = () => {
