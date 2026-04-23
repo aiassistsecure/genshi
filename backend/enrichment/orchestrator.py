@@ -659,6 +659,31 @@ async def generate_rows(
         events.append({"type": "llm_error", "error": str(e)})
         rows = _fallback_rows(headers, raw_items, domain_emails, row_limit)
 
+    # 4a. ROW-COUNT TOP-UP: the LLM normalizer occasionally returns fewer
+    # rows than requested — collapsing entities it considers similar, or being
+    # over-conservative when fields look sparse. If we still have unused raw
+    # items and we're under the requested row_limit, top up deterministically
+    # via _fallback_rows so the user actually gets the count they asked for.
+    if len(rows) < row_limit and len(raw_items) > len(rows):
+        used_sigs = {tuple(sorted(_row_signature(r, headers).items())) for r in rows}
+        unused: list[dict] = []
+        for it in raw_items:
+            # Build a synthetic single-row signature from raw item to compare
+            synth = _fallback_rows(headers, [it], domain_emails, 1)
+            if not synth:
+                continue
+            sig = tuple(sorted(_row_signature(synth[0], headers).items()))
+            if sig and sig not in used_sigs:
+                unused.append(it)
+                used_sigs.add(sig)
+            if len(rows) + len(unused) >= row_limit:
+                break
+        if unused:
+            extra = _fallback_rows(headers, unused, domain_emails, row_limit - len(rows))
+            rows.extend(extra)
+            await emit({"type": "topup", "added": len(extra),
+                        "reason": f"normalizer returned {len(rows) - len(extra)} of {row_limit} requested"})
+
     # 4b. FAILSAFE: post-LLM backfill — the LLM occasionally drops booleans
     # (False), zeros, and fields it "didn't trust". Walk every cell that
     # came back null and try to rescue it from the matching raw item.
@@ -1062,14 +1087,17 @@ async def _llm_normalize(
 
     system = (
         "You are a data normalizer for a spreadsheet generator called Genshi. "
-        "Take raw scraped items and produce exactly the requested rows matching the user's headers. "
+        "Take raw scraped items and produce one row per distinct entity matching the user's headers. "
         "Use ONLY information present in the raw data — do not invent companies, names, emails, or websites. "
         "PRESERVE booleans literally: false stays false (NOT null), 0 stays 0 (NOT null). "
         "PRESERVE numeric ratings/counts/salaries even if low — never round to null. "
         "Only set a field to null if the raw item truly contains no usable information for it. "
         "Match emails to companies by domain. "
         "Output strict JSON: {\"rows\": [{\"<header>\": <value>, ...}, ...]}. "
-        f"Produce up to {row_limit} rows. The keys of each row object MUST be EXACTLY these headers (case-sensitive): {headers}."
+        f"Produce EXACTLY {row_limit} rows when at least {row_limit} distinct entities exist in raw_items "
+        f"(if fewer distinct entities exist, produce one per entity — never invent to pad). "
+        "Do NOT collapse two distinct entities into one row even if their fields look similar. "
+        f"The keys of each row object MUST be EXACTLY these headers (case-sensitive): {headers}."
     )
     user = json.dumps({
         "headers": headers,

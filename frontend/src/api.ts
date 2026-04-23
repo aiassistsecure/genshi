@@ -94,7 +94,7 @@ export function streamSheet(sheetId: string, onEvent: (ev: { type: string; data:
     "producer_empty", "primary_done", "secondary_done", "deep_profiles_done",
     "yc_deep_done", "maps_place_done", "crunchbase_company_done",
     "crunchbase_person_done", "indeed_company_done", "indeed_job_details_done",
-    "github_enrich_done", "emails_fetched", "intel_done", "backfill",
+    "github_enrich_done", "emails_fetched", "intel_done", "backfill", "topup",
     "source_call", "source_error", "tick", "stale", "llm_error",
     "done", "persisted", "error", "end", "message",
   ].forEach((t) => {

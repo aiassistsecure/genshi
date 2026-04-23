@@ -108,6 +108,9 @@ export default function SheetView() {
       } else if (t === "backfill") {
         pushStage("✓ backfill", d.rescued_cells);
         setEvents((p) => [`backfilled ${d.rescued_cells} cells`, ...p].slice(0, 30));
+      } else if (t === "topup") {
+        pushStage("✓ topup", d.added);
+        setEvents((p) => [`topped up ${d.added} rows (${d.reason || ""})`, ...p].slice(0, 30));
       } else if (t === "intel_done") {
         pushStage("✓ signals", d.count);
         setEvents((p) => [`intelligence scan: ${d.count} signals`, ...p].slice(0, 30));
@@ -529,20 +532,44 @@ export default function SheetView() {
                 {colLabel(selectedCell.col)}{selectedCell.row + 1}
               </span>
               <span className="font-mono text-ink-700">{sheet.headers[selectedCell.col]}</span>
-              {selectedCellMeta && (
-                <>
-                  <span className={`chip ${confidenceClass(selectedCellMeta.confidence || "low")}`}>{selectedCellMeta.confidence || "low"}</span>
-                  <span>source: {selectedCellMeta.source || "—"}</span>
-                  {selectedCellMeta.verification && (
-                    <span>verify: {selectedCellMeta.verification.status}{selectedCellMeta.verification.reason ? ` (${selectedCellMeta.verification.reason})` : ""}</span>
-                  )}
-                  {(selectedCellMeta as any).strategy && (selectedCellMeta as any).strategy !== "none" && (
-                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-violet-50 border border-violet-200 text-violet-800 font-mono text-[10px]" title={(selectedCellMeta as any).reasoning || ""}>
-                      tool: {(selectedCellMeta as any).tool_called || (selectedCellMeta as any).strategy}
+              {selectedCellMeta && (() => {
+                const v = (selectedCellMeta as any).value;
+                const display = v === null || v === undefined || v === ""
+                  ? "∅ empty"
+                  : typeof v === "object" ? JSON.stringify(v) : String(v);
+                const isUrl = typeof v === "string" && /^https?:\/\//i.test(v);
+                return (
+                  <>
+                    <span className={`chip ${confidenceClass(selectedCellMeta.confidence || "low")}`}>{selectedCellMeta.confidence || "low"}</span>
+                    <span>source: {selectedCellMeta.source || "—"}</span>
+                    {selectedCellMeta.verification && (
+                      <span>verify: {selectedCellMeta.verification.status}{selectedCellMeta.verification.reason ? ` (${selectedCellMeta.verification.reason})` : ""}</span>
+                    )}
+                    {(selectedCellMeta as any).strategy && (selectedCellMeta as any).strategy !== "none" && (
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-violet-50 border border-violet-200 text-violet-800 font-mono text-[10px]" title={(selectedCellMeta as any).reasoning || ""}>
+                        tool: {(selectedCellMeta as any).tool_called || (selectedCellMeta as any).strategy}
+                      </span>
+                    )}
+                    <span className="inline-flex items-center gap-1 max-w-[420px] px-2 py-0.5 rounded bg-ink-50 border border-ink-200 font-mono text-[11px] text-ink-800 truncate"
+                          title={display}>
+                      <span className="text-ink-500 shrink-0">value:</span>
+                      {isUrl ? (
+                        <a href={v} target="_blank" rel="noreferrer"
+                           className="text-cyan-700 hover:underline truncate"
+                           onClick={(e) => e.stopPropagation()}>{display}</a>
+                      ) : (
+                        <span className={v === null || v === undefined || v === "" ? "italic text-ink-400" : "truncate"}>{display}</span>
+                      )}
+                      {display.length > 0 && v !== null && v !== undefined && v !== "" && (
+                        <button type="button"
+                                className="shrink-0 ml-1 px-1 rounded hover:bg-ink-200 text-ink-500 text-[10px]"
+                                title="Copy value"
+                                onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(display); }}>copy</button>
+                      )}
                     </span>
-                  )}
-                </>
-              )}
+                  </>
+                );
+              })()}
             </>
           ) : <span>Click a cell for details</span>}
           <span className="ml-3">{sheet.rows.length} rows · {sheet.headers.length} cols</span>
