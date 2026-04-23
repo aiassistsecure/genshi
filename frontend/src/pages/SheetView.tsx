@@ -536,6 +536,11 @@ export default function SheetView() {
                   {selectedCellMeta.verification && (
                     <span>verify: {selectedCellMeta.verification.status}{selectedCellMeta.verification.reason ? ` (${selectedCellMeta.verification.reason})` : ""}</span>
                   )}
+                  {(selectedCellMeta as any).strategy && (selectedCellMeta as any).strategy !== "none" && (
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-violet-50 border border-violet-200 text-violet-800 font-mono text-[10px]" title={(selectedCellMeta as any).reasoning || ""}>
+                      tool: {(selectedCellMeta as any).tool_called || (selectedCellMeta as any).strategy}
+                    </span>
+                  )}
                 </>
               )}
             </>

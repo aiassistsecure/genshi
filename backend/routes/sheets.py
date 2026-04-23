@@ -91,6 +91,7 @@ async def update_cell(sheet_id: str, row_id: str, header: str, payload: CellPatc
                 aiassist_key=payload.aiassist_key_override,
                 model=payload.aiassist_model,
                 provider=payload.aiassist_provider,
+                netrows_key=payload.netrows_key_override,
             )
         except LLMError as e:
             raise HTTPException(422, f"AI re-enrich failed: {e}")

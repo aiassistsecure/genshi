@@ -51,7 +51,7 @@ export const api = {
     const ov = getOverrides();
     return req<{ row_id: string; cell: Cell }>(
       `/sheets/${sheetId}/rows/${rowId}/cells/${encodeURIComponent(header)}`,
-      { method: "PATCH", body: JSON.stringify({ value, re_enrich: reEnrich, aiassist_key_override: ov.aiassist, aiassist_model: ov.model, aiassist_provider: ov.provider }) },
+      { method: "PATCH", body: JSON.stringify({ value, re_enrich: reEnrich, aiassist_key_override: ov.aiassist, aiassist_model: ov.model, aiassist_provider: ov.provider, netrows_key_override: ov.netrows }) },
     );
   },
   fillBlanks: (sheetId: string) => {

@@ -1163,23 +1163,202 @@ async def _verify_email_cells(rows: list[dict]) -> list[dict]:
     return rows
 
 
-async def re_enrich_cell(row: dict, header: str, headers: list[str], query: str, aiassist_key: Optional[str] = None, model: Optional[str] = None, provider: Optional[str] = None) -> dict:
-    """Re-ask LLM to fill a single cell using row context."""
+# --- LLM-driven re-enrich ----------------------------------------------------
+# Catalog of fetch strategies the LLM can pick from when refilling a single
+# cell. Each entry tells the LLM what the tool does, what params it needs, and
+# when it's the right choice. The catalog is intentionally small and concrete:
+# the LLM only has to choose ONE strategy + params, then we execute it and let
+# the LLM extract the value from the real payload. This replaces the previous
+# "hope the model knows the answer" flow that produced a lot of nulls.
+_REENRICH_STRATEGIES = [
+    {"id": "none",
+     "what": "Skip the fetch — answer from the row context alone (only when the value is directly inferable from another column).",
+     "params": {}},
+    {"id": "linkedin_profile_by_url",
+     "what": "Hydrate a deep LinkedIn person profile (title, position, education, geo, skills). Use when the row has a linkedin URL or username and you need person-detail fields.",
+     "params": {"url": "the linkedin person URL"}},
+    {"id": "linkedin_people",
+     "what": "Search LinkedIn people by keyword. Use when the row has a person name + company/role context but NO linkedin URL.",
+     "params": {"keyword": "search keyword (name + role/company)"}},
+    {"id": "linkedin_companies",
+     "what": "Search LinkedIn companies by keyword. Use when you need company-level fields (employee count, industry, HQ, website) and have a company name.",
+     "params": {"keyword": "company name", "geo_id": "optional numeric geo ID", "industry_id": "optional numeric industry ID"}},
+    {"id": "email_by_linkedin",
+     "what": "Find a verified email from a LinkedIn person URL. Best email-finder strategy when LinkedIn URL is known.",
+     "params": {"url": "linkedin person URL"}},
+    {"id": "email_by_name",
+     "what": "Find a verified email from full name + company domain. Use when you have name + (domain OR company name).",
+     "params": {"full_name": "person full name", "domain": "company domain", "company_name": "fallback company name"}},
+    {"id": "email_by_domain",
+     "what": "Bulk-fetch any emails for a company domain. Use only when no person info exists or the per-person strategies failed.",
+     "params": {"domain": "company domain (e.g. acme.com)"}},
+    {"id": "crunchbase_company",
+     "what": "Fetch funding, investors, revenue, technologies, monthly visits for a company. Use for those Crunchbase-specific fields.",
+     "params": {"permalink": "crunchbase permalink (slug); often equals the company name lowercased with hyphens"}},
+    {"id": "github_org",
+     "what": "Fetch a GitHub org profile (followers, public repos, languages, location, website). Use for github fields on a company row.",
+     "params": {"login": "github org login (slug)"}},
+    {"id": "github_user",
+     "what": "Fetch a GitHub user profile. Use for github fields on a person row.",
+     "params": {"login": "github username"}},
+    {"id": "google_search",
+     "what": "Semantic web search. Use as a last resort or when the field is best answered by a fresh SERP (rating, address, news, etc.).",
+     "params": {"query": "search query"}},
+]
+
+
+async def _execute_reenrich_strategy(strategy: str, params: dict, netrows_key: str) -> tuple[Any, str]:
+    """Execute one chosen strategy. Returns (payload, label) where label is a
+    short human-readable description of what was called (for the cell trail)."""
+    async with NetrowsClient(api_key=netrows_key) as nc:
+        if strategy == "linkedin_profile_by_url":
+            url = (params.get("url") or "").strip()
+            if not url: return None, "linkedin_profile_by_url(missing url)"
+            return await nc.linkedin_people_profile_by_url(url), f"linkedin_profile_by_url({url[-30:]})"
+        if strategy == "linkedin_people":
+            kw = (params.get("keyword") or "").strip()
+            if not kw: return None, "linkedin_people(missing keyword)"
+            return await nc.linkedin_people(kw), f"linkedin_people({kw[:40]})"
+        if strategy == "linkedin_companies":
+            kw = (params.get("keyword") or "").strip()
+            if not kw: return None, "linkedin_companies(missing keyword)"
+            return await nc.linkedin_companies(
+                kw, geo_id=str(params.get("geo_id") or ""),
+                industry_id=str(params.get("industry_id") or ""),
+            ), f"linkedin_companies({kw[:40]})"
+        if strategy == "email_by_linkedin":
+            url = (params.get("url") or "").strip()
+            if not url: return None, "email_by_linkedin(missing url)"
+            return await nc.email_by_linkedin(url), f"email_by_linkedin({url[-30:]})"
+        if strategy == "email_by_name":
+            name = (params.get("full_name") or "").strip()
+            dom = _domain_of(params.get("domain") or "")
+            cn = (params.get("company_name") or "").strip()
+            if not name or not (dom or cn): return None, "email_by_name(missing name+domain)"
+            return await nc.email_by_name(full_name=name, domain=dom, company_name=cn), f"email_by_name({name[:30]})"
+        if strategy == "email_by_domain":
+            dom = _domain_of(params.get("domain") or "")
+            if not dom: return None, "email_by_domain(missing domain)"
+            return await nc.email_by_domain(domain=dom), f"email_by_domain({dom})"
+        if strategy == "crunchbase_company":
+            p = (params.get("permalink") or "").strip()
+            if not p: return None, "crunchbase_company(missing permalink)"
+            return await nc.crunchbase_company(p), f"crunchbase_company({p})"
+        if strategy == "github_org":
+            login = (params.get("login") or "").strip()
+            if not login: return None, "github_org(missing login)"
+            return await nc.github_org(login), f"github_org({login})"
+        if strategy == "github_user":
+            login = (params.get("login") or "").strip()
+            if not login: return None, "github_user(missing login)"
+            return await nc.github_user(login), f"github_user({login})"
+        if strategy == "google_search":
+            q = (params.get("query") or "").strip()
+            if not q: return None, "google_search(missing query)"
+            return await nc.google_search(q, limit=5), f"google_search({q[:50]})"
+    return None, f"unknown_strategy({strategy})"
+
+
+async def re_enrich_cell(row: dict, header: str, headers: list[str], query: str,
+                         aiassist_key: Optional[str] = None, model: Optional[str] = None,
+                         provider: Optional[str] = None,
+                         netrows_key: Optional[str] = None) -> dict:
+    """Re-fill a single cell. The LLM picks ONE fetch strategy from a fixed
+    catalog (or `none` if the answer is inferable from the rest of the row),
+    we execute it, then the LLM extracts the value from the real payload. This
+    is a tool-using loop in spirit — without depending on any provider-specific
+    tool-call protocol — so every model we support participates equally.
+
+    Falls back to context-only mode when no Netrows key is configured."""
     context = {h: (row.get(h, {}).get("value") if isinstance(row.get(h), dict) else row.get(h)) for h in headers}
-    system = (
-        "You re-fill a single missing/incorrect cell in a spreadsheet row using the rest of the row as context. "
-        "Use only knowledge consistent with the other fields. Output strict JSON: {\"value\": <string-or-null>}. "
-        "If you cannot find a confident answer, return null."
+
+    # ---------- Phase 1: ask the LLM to pick a strategy ----------
+    if netrows_key:
+        plan_system = (
+            "You are filling a single missing cell in a spreadsheet row. Choose the BEST fetch "
+            "strategy from the catalog to obtain a real, current value — do NOT guess from training "
+            "data when a fetch can verify it. Pick `none` only when the value is directly derivable "
+            "from another column already filled in (e.g. constructing a LinkedIn URL from a username). "
+            "Derive params from the row context; leave optional params empty if unknown. "
+            "Output strict JSON: {\"strategy\": <id>, \"params\": <object>, \"reasoning\": <one sentence>}."
+        )
+        plan_user = json.dumps({
+            "row": context, "header_to_fill": header, "sheet_query": query,
+            "all_headers": headers, "strategies": _REENRICH_STRATEGIES,
+        })
+        try:
+            plan = await chat_json(
+                [{"role": "system", "content": plan_system},
+                 {"role": "user", "content": plan_user}],
+                api_key=aiassist_key, model=model, provider=provider,
+            )
+        except LLMError:
+            plan = {"strategy": "none", "params": {}, "reasoning": "planner failed"}
+    else:
+        plan = {"strategy": "none", "params": {},
+                "reasoning": "no Netrows key — context-only fallback"}
+
+    chosen = (plan.get("strategy") if isinstance(plan, dict) else None) or "none"
+    params = plan.get("params") if isinstance(plan, dict) and isinstance(plan.get("params"), dict) else {}
+    reasoning = plan.get("reasoning") if isinstance(plan, dict) else ""
+
+    # ---------- Phase 2: execute (or skip) ----------
+    payload: Any = None
+    tool_label = "context-only"
+    if chosen != "none" and netrows_key:
+        payload, tool_label = await _execute_reenrich_strategy(chosen, params, netrows_key)
+
+    # ---------- Phase 3: extract the value ----------
+    extract_system = (
+        "Extract the requested cell value from the row context plus the fetched payload. "
+        "Prefer the payload over training-data guesses. If neither has a confident answer, "
+        "return null. Output strict JSON: {\"value\": <string-or-null>, \"confidence\": <\"high\"|\"medium\"|\"low\">}."
     )
-    user = json.dumps({"row": context, "header_to_fill": header, "sheet_query": query, "all_headers": headers})
-    out = await chat_json([
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ], api_key=aiassist_key, model=model, provider=provider)
+    extract_user = json.dumps({
+        "row": context, "header_to_fill": header, "sheet_query": query,
+        "strategy_used": chosen, "fetched_payload": _trim_payload_for_llm(payload),
+    })
+    try:
+        out = await chat_json(
+            [{"role": "system", "content": extract_system},
+             {"role": "user", "content": extract_user}],
+            api_key=aiassist_key, model=model, provider=provider,
+        )
+    except LLMError:
+        out = {"value": None, "confidence": "low"}
+
     val = out.get("value") if isinstance(out, dict) else None
-    cell = _cell(val, "ai", "low" if val else "low")
+    conf = (out.get("confidence") if isinstance(out, dict) else None) or ("medium" if val else "low")
+    src = f"ai+{chosen}" if chosen != "none" and payload else "ai"
+    cell = _cell(val, src, conf)
+    cell["strategy"] = chosen
+    cell["tool_called"] = tool_label
+    if reasoning:
+        cell["reasoning"] = reasoning[:200]
     if header.lower() == "email" and val:
         v = await verify_email(str(val))
         cell["verification"] = {"status": v["status"], "reason": v.get("reason", "")}
-        cell["confidence"] = v["status"] if v["status"] in ("verified", "invalid", "uncertain") else "low"
+        cell["confidence"] = v["status"] if v["status"] in ("verified", "invalid", "uncertain") else conf
     return cell
+
+
+def _trim_payload_for_llm(payload: Any, max_chars: int = 6000) -> Any:
+    """Netrows payloads can be huge (full LinkedIn profiles, search hit arrays).
+    Trim to keep the second LLM call cheap and within context limits."""
+    if payload is None:
+        return None
+    try:
+        s = json.dumps(payload, default=str)
+        if len(s) <= max_chars:
+            return payload
+        # If it's a dict-with-items list, keep first 3 items
+        if isinstance(payload, dict):
+            for k in ("items", "results", "data"):
+                if isinstance(payload.get(k), list):
+                    p2 = dict(payload); p2[k] = payload[k][:3]
+                    s2 = json.dumps(p2, default=str)
+                    if len(s2) <= max_chars:
+                        return p2
+        return json.loads(s[:max_chars] + "}" if s.startswith("{") else s[:max_chars] + "]")
+    except Exception:
+        return {"_truncated": True, "_preview": str(payload)[:max_chars]}

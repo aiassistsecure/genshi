@@ -30,6 +30,7 @@ class CellPatch(BaseModel):
     aiassist_key_override: Optional[str] = None
     aiassist_model: Optional[str] = None
     aiassist_provider: Optional[str] = None
+    netrows_key_override: Optional[str] = None
 
 
 class RowOut(BaseModel):
