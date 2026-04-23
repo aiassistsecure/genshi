@@ -139,12 +139,14 @@ class NetrowsClient:
 
     # ---- Endpoints ----
     async def linkedin_people(self, query: str, location: str = "", limit: int = 15,
-                              geo_id: str = "", industry_id: str = "", company: str = ""):
+                              geo_id: str = "", industry_id: str = "", company: str = "",
+                              start: int = 0):
         # /v1/people/search supports: firstName, lastName, keywords, geo, keywordTitle,
         # schoolId, keywordSchool, company, start. People search has NO industry filter
         # (industry_id is accepted for API symmetry but ignored — kept here so callers
-        # can pass the same plan dict to every endpoint).
-        params: dict[str, Any] = {"keywords": query, "keywordTitle": query, "start": 0}
+        # can pass the same plan dict to every endpoint). `start` is the offset for
+        # pagination (LinkedIn returns ~10 per page).
+        params: dict[str, Any] = {"keywords": query, "keywordTitle": query, "start": int(start)}
         if geo_id and str(geo_id).isdigit():
             params["geo"] = str(geo_id)
         elif location and location.isdigit():
@@ -163,13 +165,14 @@ class NetrowsClient:
     async def linkedin_companies(self, query: str, location: str = "", limit: int = 15,
                                  geo_id: str = "", industry_id: str = "",
                                  employee_min: Optional[int] = None,
-                                 employee_max: Optional[int] = None):
+                                 employee_max: Optional[int] = None,
+                                 page: int = 1):
         # /v1/companies/search — Netrows-documented filter names:
         #   keyword, page, locations (csv geo IDs), industries (csv industry IDs),
         #   companySizes (csv letter codes A-H), hasJobs (bool)
         # Employee count is filtered via LinkedIn's letter-coded size buckets, not a
         # numeric range — we map our employee_min/max bounds to the overlapping codes.
-        params: dict[str, Any] = {"keyword": query, "page": 1}
+        params: dict[str, Any] = {"keyword": query, "page": int(page)}
         if geo_id and str(geo_id).isdigit():
             params["locations"] = str(geo_id)
         elif location and location.isdigit():

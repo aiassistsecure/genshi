@@ -162,11 +162,6 @@ Pull requests are welcome for bug fixes and non-competing improvements. For majo
 
 *Built by [Interchained LLC](https://interchained.org) · Engineered with Replit AI (April 2026)*
 
-### Acknowledgements
-
-- **GenShi (Mark Allen Evans)** — product, architecture, and persistence design
-- **Ra (Replit Agent)** — collaboration partner on the query-planning and source-routing layer (April 2026)
-
 ---
 
 > Want to build something like this? Start on Replit — [replit.com/refer/interchained](https://replit.com/refer/interchained)

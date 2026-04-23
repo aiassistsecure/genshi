@@ -16,6 +16,12 @@ export default function SheetView() {
   const [stageLog, setStageLog] = useState<{label: string; count?: number; ts: number}[]>([]);
   const [primary, setPrimary] = useState<string>("");
   const [plan, setPlan] = useState<string[]>([]);
+  const [queryPlan, setQueryPlan] = useState<{
+    search_keyword?: string; location_name?: string | null; location_geo_id?: string | null;
+    industry_name?: string | null; industry_id?: string | null; technology?: string | null;
+    employee_min?: number | null; employee_max?: number | null;
+  } | null>(null);
+  const [emptyHint, setEmptyHint] = useState<string>("");
   const esRef = useRef<EventSource | null>(null);
   const [selectedCell, setSelectedCell] = useState<{ row: number; col: number } | null>(null);
 
@@ -57,6 +63,28 @@ export default function SheetView() {
         setPlan(d.sources || []);
         pushStage("plan", (d.sources || []).length);
         setEvents((p) => [`plan: ${(d.sources || []).join(" → ")}`, ...p].slice(0, 30));
+      } else if (t === "query_plan") {
+        setQueryPlan(d);
+        pushStage("✓ query plan");
+        const bits: string[] = [];
+        if (d.search_keyword) bits.push(`keyword="${d.search_keyword}"`);
+        if (d.location_name) bits.push(`loc=${d.location_name}${d.location_geo_id ? `(${d.location_geo_id})` : ""}`);
+        if (d.industry_name) bits.push(`industry=${d.industry_name}${d.industry_id ? `(${d.industry_id})` : ""}`);
+        if (d.technology) bits.push(`tech=${d.technology}`);
+        if (d.employee_min != null || d.employee_max != null) bits.push(`size=${d.employee_min ?? "?"}–${d.employee_max ?? "?"}`);
+        setEvents((p) => [`query plan: ${bits.join(" · ")}`, ...p].slice(0, 30));
+      } else if (t === "page_fetched") {
+        pushStage(`page ${d.page}`, d.count);
+      } else if (t === "primary_retry") {
+        pushStage("↻ retry no-filters");
+        setEvents((p) => [`retry: ${d.source} without filters (${d.reason})`, ...p].slice(0, 30));
+      } else if (t === "fallback") {
+        pushStage(`→ ${d.to}`);
+        setEvents((p) => [`fallback ${d.from} → ${d.to}`, ...p].slice(0, 30));
+      } else if (t === "producer_empty") {
+        setEmptyHint(d.hint || "Primary producer returned 0 results.");
+        pushStage("∅ no results");
+        setEvents((p) => [`⚠ ${d.source} returned 0 results`, ...p].slice(0, 30));
       } else if (t === "primary_done") {
         setPrimary(d.source || "");
         pushStage(`✓ ${d.source}`, d.count);
@@ -97,7 +125,8 @@ export default function SheetView() {
   }, [id, refresh]);
 
   const generate = async () => {
-    setError(""); setEvents([]); setStageLog([]); setPlan([]); setPrimary(""); setStage("starting…");
+    setError(""); setEvents([]); setStageLog([]); setPlan([]); setPrimary("");
+    setQueryPlan(null); setEmptyHint(""); setStage("starting…");
     try {
       await api.generate(id, { row_limit: 15 });
       setSheet((s) => s ? { ...s, status: "generating" } : s);
@@ -268,9 +297,9 @@ export default function SheetView() {
       </div>
 
       {/* Status strip + stage timeline */}
-      {(stage || error || events.length > 0 || stageLog.length > 0) && (
+      {(stage || error || events.length > 0 || stageLog.length > 0 || queryPlan || emptyHint) && (
         <div className="border-b border-ink-200 bg-gradient-to-b from-ink-50 to-white px-6 py-2 text-xs text-ink-600 shrink-0">
-          <div className="flex items-center gap-3 mb-1">
+          <div className="flex items-center gap-3 mb-1 flex-wrap">
             {stage && (
               <span className="inline-flex items-center gap-1.5 font-medium text-amber-700">
                 <span className="relative flex h-2 w-2">
@@ -284,15 +313,84 @@ export default function SheetView() {
             {plan.length > 0 && <span className="text-ink-400 hidden md:inline truncate">plan: <span className="font-mono">{plan.join(" → ")}</span></span>}
             {error && <span className="text-red-600">⚠ {error}</span>}
           </div>
+
+          {/* Decoded search plan — exactly what we sent to the data source */}
+          {queryPlan && (
+            <div className="flex items-center gap-1.5 mb-1 flex-wrap">
+              <span className="text-[10px] uppercase tracking-wide text-ink-400 mr-1">search plan</span>
+              {queryPlan.search_keyword && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-cyan-50 border border-cyan-200 text-cyan-800 text-[10px] font-mono">
+                  keyword<span className="text-cyan-500">·</span>{queryPlan.search_keyword}
+                </span>
+              )}
+              {queryPlan.location_name && (
+                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono border ${
+                  queryPlan.location_geo_id ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-ink-50 border-ink-200 text-ink-600"
+                }`}>
+                  loc<span className="opacity-50">·</span>{queryPlan.location_name}
+                  {queryPlan.location_geo_id && <span className="opacity-60">#{queryPlan.location_geo_id}</span>}
+                  {!queryPlan.location_geo_id && <span title="not in static map — passed unresolved" className="opacity-60">?</span>}
+                </span>
+              )}
+              {queryPlan.industry_name && (
+                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono border ${
+                  queryPlan.industry_id ? "bg-violet-50 border-violet-200 text-violet-800" : "bg-ink-50 border-ink-200 text-ink-600"
+                }`}>
+                  industry<span className="opacity-50">·</span>{queryPlan.industry_name}
+                  {queryPlan.industry_id && <span className="opacity-60">#{queryPlan.industry_id}</span>}
+                  {!queryPlan.industry_id && <span title="not in static map — filter omitted" className="opacity-60">?</span>}
+                </span>
+              )}
+              {queryPlan.technology && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-800 text-[10px] font-mono">
+                  tech<span className="opacity-50">·</span>{queryPlan.technology}
+                </span>
+              )}
+              {(queryPlan.employee_min != null || queryPlan.employee_max != null) && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-800 text-[10px] font-mono">
+                  size<span className="opacity-50">·</span>{queryPlan.employee_min ?? "?"}–{queryPlan.employee_max ?? "?"}
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Producer-empty banner with hint */}
+          {emptyHint && (
+            <div className="mb-1 px-2 py-1 rounded bg-amber-50 border border-amber-200 text-amber-800 text-[11px]">
+              <span className="font-semibold">No primary results.</span> {emptyHint}
+            </div>
+          )}
+
+          {/* Stage timeline */}
           {stageLog.length > 0 && (
             <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
               {stageLog.map((s, i) => (
                 <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white border border-ink-200 text-[10px] font-mono whitespace-nowrap shadow-sm">
-                  <span className={s.label.startsWith("✓") ? "text-accent-700" : "text-ink-600"}>{s.label}</span>
+                  <span className={s.label.startsWith("✓") ? "text-accent-700" :
+                                   s.label.startsWith("∅") ? "text-amber-700" :
+                                   s.label.startsWith("↻") || s.label.startsWith("→") ? "text-violet-700" :
+                                   "text-ink-600"}>{s.label}</span>
                   {s.count != null && <span className="text-ink-400">· {s.count}</span>}
                 </span>
               ))}
             </div>
+          )}
+
+          {/* Live event feed (most recent 5) — collapsed details for the rest */}
+          {events.length > 0 && (
+            <details className="mt-1">
+              <summary className="cursor-pointer text-[10px] uppercase tracking-wide text-ink-400 hover:text-ink-600">
+                live events ({events.length})
+              </summary>
+              <div className="mt-1 max-h-40 overflow-y-auto bg-ink-900/95 text-ink-100 rounded p-2 font-mono text-[10px] leading-relaxed">
+                {events.map((e, i) => (
+                  <div key={i} className="whitespace-pre-wrap break-all">
+                    <span className="text-ink-500 mr-2">{String(events.length - i).padStart(2, "0")}</span>
+                    {e}
+                  </div>
+                ))}
+              </div>
+            </details>
           )}
         </div>
       )}
