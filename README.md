@@ -1,20 +1,5 @@
 # GenShi — Generate Sheets
-```
- ██████╗ ███████╗███╗   ██╗███████╗██╗  ██╗██╗
-██╔════╝ ██╔════╝████╗  ██║██╔════╝██║  ██║██║
-██║  ███╗█████╗  ██╔██╗ ██║███████╗███████║██║
-██║   ██║██╔══╝  ██║╚██╗██║╚════██║██╔══██║██║
-╚██████╔╝███████╗██║ ╚████║███████║██║  ██║██║
- ╚═════╝ ╚══════╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝╚═╝
-  ┌─────────────────────────────────────────────────┐
-  │  Company          │ Email         │ ARR    │ ... │
-  │──────────────────────────────────────────────── │
-  │  Acme Corp  ░░░░  │ ░░░░░░░░░░░░  │ ░░░░░  │ ▓▓▓ │
-  │  NovaTech   ░░░░  │ ░░░░░░░░░░░░  │ ░░░░░  │ ▓▓▓ │
-  │  BluePeak   ████  │ ████████████  │ █████  │ ███ │
-  └─────────────────────────────────────────────────┘
-         AI-powered · Real B2B data · Live streaming
-```
+
 > AI-powered spreadsheet generator. Define your columns, describe what you need, and watch 15 rows of real-world B2B data appear — verified, enriched, and ready to export.
 
 ---
@@ -161,6 +146,11 @@ Pull requests are welcome for bug fixes and non-competing improvements. For majo
 ---
 
 *Built by [Interchained LLC](https://interchained.org) · Engineered with Replit AI (April 2026)*
+
+### Acknowledgements
+
+- **GenShi (Mark Allen Evans)** — product, architecture, and persistence design
+- **Ra (Replit Agent)** — collaboration partner on the query-planning and source-routing layer (April 2026)
 
 ---
 

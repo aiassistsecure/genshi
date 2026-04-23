@@ -9,6 +9,7 @@ from ..sources.netrows import NetrowsClient, NetrowsError, extract_items
 from ..sources.intelligence import scan_signals
 from ..sources.header_map import normalize_header, needs_email, COMPANY_PRODUCERS
 from .router import plan_sources
+from .query_planner import plan_query
 from .llm import chat_json, chat_text, LLMError
 from ..verification.email_verify import verify_email
 
@@ -75,18 +76,68 @@ async def generate_rows(
     primary = next((s for s in sources if s in COMPANY_PRODUCERS), sources[0] if sources else "google_search")
     await emit({"type": "stage", "stage": "fetching", "primary": primary})
 
+    # 2a. Decompose the natural-language query into provider-native parameters
+    # (geo IDs, industry IDs, employee bands). One LLM call, reused across all
+    # producer fetches in this generation. Falls back to raw query on miss.
+    plan = await plan_query(
+        query, api_key=aiassist_key, model=aiassist_model, provider=aiassist_provider,
+    )
+    await emit({
+        "type": "query_plan",
+        "search_keyword": plan["search_keyword"],
+        "location_name": plan["location_name"],
+        "location_geo_id": plan["location_geo_id"],
+        "industry_name": plan["industry_name"],
+        "industry_id": plan["industry_id"],
+        "technology": plan["technology"],
+        "employee_min": plan["employee_min"],
+        "employee_max": plan["employee_max"],
+    })
+
     raw_items: list[dict] = []
     async with NetrowsClient(api_key=netrows_key) as nc:
-        # Primary fetch
-        primary_payload = await _safe_call(_call_endpoint(nc, primary, query, row_limit), primary, events, progress)
+        # Primary fetch — uses the structured plan
+        primary_payload = await _safe_call(_call_endpoint(nc, primary, query, row_limit, plan), primary, events, progress)
         items = extract_items(primary_payload)[:row_limit]
+
+        # Filter-too-narrow retry: if the structured filters returned 0 hits and
+        # we actually applied any (geo or industry), retry once with just the
+        # keyword. Costs at most one extra credit and protects against stale geo
+        # IDs, wrong industry mappings, or over-restrictive combos. Only does
+        # the retry on sources that take structured filters.
+        applied_filters = bool((plan.get("location_geo_id") or plan.get("industry_id"))
+                               and primary in ("linkedin_companies", "linkedin_people", "linkedin_jobs"))
+        if not items and applied_filters:
+            await emit({"type": "primary_retry", "source": primary, "reason": "structured filters returned 0; retrying without filters"})
+            unfiltered_plan = {**plan, "location_geo_id": None, "industry_id": None,
+                               "employee_min": None, "employee_max": None}
+            primary_payload = await _safe_call(_call_endpoint(nc, primary, query, row_limit, unfiltered_plan), f"{primary}:retry", events, progress)
+            items = extract_items(primary_payload)[:row_limit]
+
         raw_items.extend(items)
         await emit({"type": "primary_done", "source": primary, "count": len(items)})
 
+        # Producer-empty short-circuit: if the primary returned nothing even
+        # after the unfiltered retry, there are no anchor entities to enrich.
+        # Skip the dependent person fetch so we don't burn more credits chasing
+        # zero anchors. Surface the plan and a hint so the user can refine.
+        if not items:
+            await emit({
+                "type": "producer_empty",
+                "source": primary,
+                "plan": plan,
+                "hint": (
+                    "Primary producer returned 0 results. The query may be too "
+                    "specific for keyword-style company search. Try a broader "
+                    "keyword (e.g. 'game studio' instead of 'video game producers')."
+                ),
+            })
+
         # Person enrichment if "person" headers present and person source not yet used
-        person_sources = [s for s in sources if s == "linkedin_people" and s != primary]
+        # (only when we actually have anchors to enrich)
+        person_sources = [s for s in sources if s == "linkedin_people" and s != primary] if items else []
         for ps in person_sources[:1]:
-            extra = await _safe_call(_call_endpoint(nc, ps, query, row_limit), ps, events, progress)
+            extra = await _safe_call(_call_endpoint(nc, ps, query, row_limit, plan), ps, events, progress)
             extra_items = extract_items(extra)
             if extra_items:
                 raw_items.extend(extra_items[:row_limit])
@@ -557,22 +608,38 @@ async def generate_rows(
     return rows
 
 
-async def _call_endpoint(nc: NetrowsClient, source: str, query: str, limit: int):
+async def _call_endpoint(nc: NetrowsClient, source: str, query: str, limit: int,
+                         plan: Optional[dict] = None):
+    """Call a Netrows producer endpoint. When `plan` is provided, use the
+    decomposed search_keyword + resolved geo/industry IDs so structured filters
+    actually narrow the result set. Falls back to raw query when plan is None
+    or the source doesn't support structured params."""
+    p = plan or {}
+    kw = p.get("search_keyword") or query
+    geo_id = p.get("location_geo_id") or ""
+    industry_id = p.get("industry_id") or ""
+    emp_min = p.get("employee_min")
+    emp_max = p.get("employee_max")
+
     if source == "linkedin_people":
-        return await nc.linkedin_people(query, limit=limit)
+        return await nc.linkedin_people(kw, limit=limit, geo_id=geo_id, industry_id=industry_id)
     if source == "linkedin_companies":
-        return await nc.linkedin_companies(query, limit=limit)
+        return await nc.linkedin_companies(
+            kw, limit=limit, geo_id=geo_id, industry_id=industry_id,
+            employee_min=emp_min, employee_max=emp_max,
+        )
     if source == "google_search":
+        # Google search benefits from the FULL natural query (semantic SERP).
         return await nc.google_search(query, limit=limit)
     if source == "google_maps":
         return await nc.google_maps(query, limit=limit)
     if source == "linkedin_jobs":
-        return await nc.linkedin_jobs(query, limit=limit)
+        return await nc.linkedin_jobs(kw, limit=limit, geo_id=geo_id, industry_id=industry_id)
     if source == "indeed_jobs":
-        return await nc.indeed_jobs(query, limit=limit)
+        return await nc.indeed_jobs(kw, location=p.get("location_name") or "", limit=limit)
     # Crunchbase is enricher-only (BETA, no search) — handled in dedicated phase
     if source == "yc_search":
-        return await nc.yc_search(query=query, per_page=max(limit, 20))
+        return await nc.yc_search(query=kw, per_page=max(limit, 20))
     # GitHub sources are enrichers handled separately — not callable as primary producer
     return None
 

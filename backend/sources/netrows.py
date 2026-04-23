@@ -58,6 +58,25 @@ def _path(key: str) -> str:
     return os.environ.get(f"NETROWS_PATH_{key.upper()}", DEFAULT_PATHS[key])
 
 
+# LinkedIn company size buckets. The companies/search endpoint filters by these
+# letter codes, not by numeric employee counts.
+_LINKEDIN_SIZE_BUCKETS = [
+    ("A", 1, 10), ("B", 11, 50), ("C", 51, 200), ("D", 201, 500),
+    ("E", 501, 1000), ("F", 1001, 5000), ("G", 5001, 10000),
+    ("H", 10001, 10_000_000),
+]
+
+
+def _employee_bounds_to_size_codes(emp_min: Optional[int], emp_max: Optional[int]) -> list[str]:
+    """Map a numeric employee range to overlapping LinkedIn size-code buckets.
+    Returns [] when both bounds are None so the filter is omitted entirely."""
+    if emp_min is None and emp_max is None:
+        return []
+    lo = emp_min if emp_min is not None else 0
+    hi = emp_max if emp_max is not None else 10_000_000
+    return [code for (code, b_lo, b_hi) in _LINKEDIN_SIZE_BUCKETS if b_lo <= hi and b_hi >= lo]
+
+
 class NetrowsError(Exception):
     pass
 
@@ -119,13 +138,19 @@ class NetrowsClient:
             raise NetrowsError(f"Netrows non-JSON response: {r.text[:200]}")
 
     # ---- Endpoints ----
-    async def linkedin_people(self, query: str, location: str = "", limit: int = 15):
-        # /v1/people/search takes: firstName, lastName, keywords, geo, keywordTitle,
-        # schoolId, keywordSchool, company, start. We map our generic query to keywords +
-        # keywordTitle. `geo` is a LinkedIn geo ID (numeric) — only pass if it looks like one.
+    async def linkedin_people(self, query: str, location: str = "", limit: int = 15,
+                              geo_id: str = "", industry_id: str = "", company: str = ""):
+        # /v1/people/search supports: firstName, lastName, keywords, geo, keywordTitle,
+        # schoolId, keywordSchool, company, start. People search has NO industry filter
+        # (industry_id is accepted for API symmetry but ignored — kept here so callers
+        # can pass the same plan dict to every endpoint).
         params: dict[str, Any] = {"keywords": query, "keywordTitle": query, "start": 0}
-        if location and location.isdigit():
+        if geo_id and str(geo_id).isdigit():
+            params["geo"] = str(geo_id)
+        elif location and location.isdigit():
             params["geo"] = location
+        if company:
+            params["company"] = company
         return await self._get(_path("linkedin_people"), params)
 
     async def linkedin_people_profile(self, username: str):
@@ -135,12 +160,25 @@ class NetrowsClient:
     async def linkedin_people_profile_by_url(self, url: str):
         return await self._get(_path("linkedin_people_profile_by_url"), {"url": url})
 
-    async def linkedin_companies(self, query: str, location: str = "", limit: int = 15):
-        # /v1/companies/search — `keyword` + `page` are the only practical requirements;
-        # other filters are documented as required but the API accepts empty strings or omission.
+    async def linkedin_companies(self, query: str, location: str = "", limit: int = 15,
+                                 geo_id: str = "", industry_id: str = "",
+                                 employee_min: Optional[int] = None,
+                                 employee_max: Optional[int] = None):
+        # /v1/companies/search — Netrows-documented filter names:
+        #   keyword, page, locations (csv geo IDs), industries (csv industry IDs),
+        #   companySizes (csv letter codes A-H), hasJobs (bool)
+        # Employee count is filtered via LinkedIn's letter-coded size buckets, not a
+        # numeric range — we map our employee_min/max bounds to the overlapping codes.
         params: dict[str, Any] = {"keyword": query, "page": 1}
-        if location and location.isdigit():
+        if geo_id and str(geo_id).isdigit():
+            params["locations"] = str(geo_id)
+        elif location and location.isdigit():
             params["locations"] = location
+        if industry_id and str(industry_id).isdigit():
+            params["industries"] = str(industry_id)
+        sizes = _employee_bounds_to_size_codes(employee_min, employee_max)
+        if sizes:
+            params["companySizes"] = ",".join(sizes)
         return await self._get(_path("linkedin_companies"), params)
 
     async def linkedin_company_details(self, username: str):
@@ -224,12 +262,17 @@ class NetrowsClient:
         if feature_id: params["feature_id"] = feature_id
         return await self._get(_path("google_maps_reviews"), params)
 
-    async def linkedin_jobs(self, query: str, location: str = "", limit: int = 15, **filters):
+    async def linkedin_jobs(self, query: str, location: str = "", limit: int = 15,
+                            geo_id: str = "", industry_id: str = "", **filters):
         # /v1/jobs/search — `keywords` is required. Optional: locationId, datePosted,
         # experienceLevel, jobType, onsiteRemote, salary, start, sort, industryIds, etc.
         params: dict[str, Any] = {"keywords": query, "start": 0, "sort": "mostRelevant"}
-        if location and location.isdigit():
+        if geo_id and str(geo_id).isdigit():
+            params["locationId"] = str(geo_id)
+        elif location and location.isdigit():
             params["locationId"] = location
+        if industry_id and str(industry_id).isdigit():
+            params["industryIds"] = str(industry_id)
         for k, v in filters.items():
             if v not in (None, ""):
                 params[k] = v
